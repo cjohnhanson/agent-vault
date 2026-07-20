@@ -366,9 +366,14 @@ func (p *Proxy) forwardRequest(
 	// OAuth 401 retry: if the upstream rejected the token and we have an
 	// OAuth credential, force-refresh and retry once. Only safe methods
 	// (GET/HEAD) are retried — the request body is consumed and cannot be replayed.
+	// The original response body is closed only when a retry response actually
+	// replaces it: closing it up front leaves the fall-through relay (e.g. a
+	// matched service with no injectable headers, like auth: passthrough)
+	// streaming a closed body — the client gets the 401's headers with a
+	// Content-Length it can never satisfy, which breaks HTTP auth negotiation
+	// (git's basic-auth retry, among others).
 	if resp.StatusCode == http.StatusUnauthorized && inject != nil && !inject.Passthrough &&
 		(r.Method == http.MethodGet || r.Method == http.MethodHead) {
-		_ = resp.Body.Close()
 		retryInject, retryErr := p.creds.Inject(r.Context(), scope.VaultID, host, port, r.URL.Path, r.Method)
 		if retryErr == nil && retryInject != nil && retryInject.Headers != nil {
 			retryReq := outReq.Clone(outReq.Context())
@@ -378,6 +383,7 @@ func (p *Proxy) forwardRequest(
 			retryReq.Body = http.NoBody
 			retryReq.ContentLength = 0
 			if retryResp, retryRTErr := p.upstream.RoundTrip(retryReq); retryRTErr == nil {
+				_ = resp.Body.Close()
 				resp = retryResp
 				p.logger.Debug("oauth 401 retry succeeded",
 					slog.String("host", host),
